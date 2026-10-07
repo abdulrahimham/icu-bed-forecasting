@@ -1,0 +1,14 @@
+# Virtual environment (rebuilt from requirements.txt)
+.venv/
+
+# Processed data (rebuilt by running the notebooks)
+data/processed/
+
+# Jupyter autosave files
+.ipynb_checkpoints/
+
+# Python cache
+__pycache__/
+
+# macOS system files
+.DS_Store
