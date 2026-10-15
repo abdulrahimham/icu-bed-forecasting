@@ -24,6 +24,38 @@ def load_icu_weekly():
     return icu_weekly.sort_values("week_ending").reset_index(drop=True)
 
 
+def rebuild_ranges(backtest, errors_since=None, last_n_errors=None):
+    """Set each forecast's 80% range from the same rule's past errors at the same horizon.
+
+    Only errors whose target week had already happened by the forecast origin are used, so the
+    range never relies on future information. Flagged weeks are never used.
+    errors_since: only use past errors with target weeks on or after this date.
+    last_n_errors: only use the most recent n past errors (a moving window).
+    """
+    backtest = backtest.copy()
+    lower_quantile = (1 - RANGE_COVERAGE_TARGET) / 2
+    upper_quantile = 1 - lower_quantile
+    error_pool = backtest[backtest["usable"] & backtest["error_share_pts"].notna()]
+    if errors_since is not None:
+        error_pool = error_pool[error_pool["target_week"] >= pd.Timestamp(errors_since)]
+    lower_bounds, upper_bounds = [], []
+    for row in backtest.itertuples():
+        past_errors = error_pool.loc[
+            (error_pool["horizon_weeks"] == row.horizon_weeks) & (error_pool["target_week"] <= row.origin_week)
+        ].sort_values("target_week")["error_share_pts"]
+        if last_n_errors is not None:
+            past_errors = past_errors.iloc[-last_n_errors:]
+        if len(past_errors) < MINIMUM_PAST_ERRORS_FOR_RANGE:
+            lower_bounds.append(np.nan)
+            upper_bounds.append(np.nan)
+            continue
+        lower_bounds.append(row.forecast_share_pct + past_errors.quantile(lower_quantile))
+        upper_bounds.append(row.forecast_share_pct + past_errors.quantile(upper_quantile))
+    backtest["range_low_pct"] = lower_bounds
+    backtest["range_high_pct"] = upper_bounds
+    return backtest
+
+
 def run_backtest(icu_weekly, forecast_rule, rule_name, range_errors_since=None):
     """Forecast 1 to 4 weeks ahead from every week, using only data available at that week.
 
@@ -56,27 +88,7 @@ def run_backtest(icu_weekly, forecast_rule, rule_name, range_errors_since=None):
     backtest = pd.DataFrame(rows)
     backtest["error_share_pts"] = backtest["actual_share_pct"] - backtest["forecast_share_pct"]
 
-    # 80% range from this rule's own past errors at the same horizon, using only target weeks
-    # that had already happened by the forecast origin
-    lower_quantile = (1 - RANGE_COVERAGE_TARGET) / 2
-    upper_quantile = 1 - lower_quantile
-    error_pool = backtest[backtest["usable"] & backtest["error_share_pts"].notna()]
-    if range_errors_since is not None:
-        error_pool = error_pool[error_pool["target_week"] >= pd.Timestamp(range_errors_since)]
-    lower_bounds, upper_bounds = [], []
-    for row in backtest.itertuples():
-        past_errors = error_pool.loc[
-            (error_pool["horizon_weeks"] == row.horizon_weeks) & (error_pool["target_week"] <= row.origin_week),
-            "error_share_pts",
-        ]
-        if len(past_errors) < MINIMUM_PAST_ERRORS_FOR_RANGE:
-            lower_bounds.append(np.nan)
-            upper_bounds.append(np.nan)
-            continue
-        lower_bounds.append(row.forecast_share_pct + past_errors.quantile(lower_quantile))
-        upper_bounds.append(row.forecast_share_pct + past_errors.quantile(upper_quantile))
-    backtest["range_low_pct"] = lower_bounds
-    backtest["range_high_pct"] = upper_bounds
+    backtest = rebuild_ranges(backtest, errors_since=range_errors_since)
 
     # Convert to patients using the average bed count over the 4 weeks up to the origin
     recent_average_beds = beds_available_by_week.rolling(4).mean()
